@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  sfu:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: media-server:latest
+    container_name: media-server-sfu
+    restart: unless-stopped
+    ports:
+      - "50051:50051/tcp"
+      - "3478-3482:3478-3482/udp"
+    command: [
+      "/app/sfu-server",
+      "--grpc_addr", "0.0.0.0:50051",
+      "--host", "0.0.0.0",
+      "--media_port_min", "3478",
+      "--media_port_max", "3482"
+    ]

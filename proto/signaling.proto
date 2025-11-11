@@ -1,0 +1,30 @@
+syntax = "proto3";
+package signaling;
+
+message OfferRequest {
+  uint64 session_id = 1;
+  uint64 endpoint_id = 2;
+  string offer_sdp = 3; // JSON string of RTCSessionDescription
+}
+
+message OfferResponse {
+  uint64 session_id = 1;
+  uint64 endpoint_id = 2;
+  string answer_sdp = 3; // JSON string
+  string error = 4; // non-empty if error
+}
+
+message LeaveRequest {
+  uint64 session_id = 1;
+  uint64 endpoint_id = 2;
+}
+
+message LeaveResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+service Signaling {
+  rpc Offer(OfferRequest) returns (OfferResponse);
+  rpc Leave(LeaveRequest) returns (LeaveResponse);
+}
