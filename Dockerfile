@@ -1,7 +1,10 @@
 ## Multi-stage build for media-server (sfu-server binary)
 
 # ---------- Builder stage ----------
-FROM rust:1.82 as builder
+FROM rust:1.91.1 as builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 

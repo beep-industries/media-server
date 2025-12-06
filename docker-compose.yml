@@ -8,13 +8,11 @@ services:
     image: media-server:latest
     container_name: media-server-sfu
     restart: unless-stopped
+    network_mode: host
     ports:
       - "50051:50051/tcp"
       - "3478-3482:3478-3482/udp"
     command: [
       "/app/sfu-server",
-      "--grpc_addr", "0.0.0.0:50051",
-      "--host", "0.0.0.0",
-      "--media_port_min", "3478",
-      "--media_port_max", "3482"
+      "-f"
     ]
