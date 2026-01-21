@@ -1,0 +1,28 @@
+apiVersion: stunner.l7mp.io/v1
+kind: UDPRoute
+metadata:
+  name: sfu-media-route
+  namespace: stunner
+spec:
+  parentRefs:
+    - name: udp-gateway
+  rules:
+    - backendRefs:
+        - name: sfu-server
+          namespace: sfu
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: sfu-grpc-route
+spec:
+  parentRefs:
+    - name: web
+      namespace: gateway
+  hostnames: ["new.beep.ovh"]
+  rules:
+    - backendRefs:
+        - name: sfu-server
+          namespace: sfu
+          port: 50051
+

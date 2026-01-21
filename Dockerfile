@@ -11,12 +11,8 @@ WORKDIR /build
 # Cache dependencies first
 COPY Cargo.toml Cargo.lock ./
 COPY build.rs ./
-RUN mkdir -p src && echo "fn main(){}" > src/lib.rs
-RUN cargo build --release || true
-
-# Copy actual source
-COPY src ./src
 COPY proto ./proto
+COPY src ./src
 
 # Build release binary
 RUN cargo build --bin sfu-server --release
@@ -39,4 +35,4 @@ EXPOSE 50051/tcp
 EXPOSE 3478-3482/udp
 
 # Run with safe defaults that bind to all interfaces
-CMD ["/app/sfu-server", "--grpc_addr", "0.0.0.0:50051", "--host", "0.0.0.0", "--media_port_min", "3478", "--media_port_max", "3482"]
+CMD ["/app/sfu-server", "--grpc-addr", "0.0.0.0:50051", "--host", "0.0.0.0", "--media-port-min", "3478", "--media-port-max", "3482"]

@@ -52,6 +52,31 @@ Set environment variables or use defaults:
 └── Cargo.toml
 ```
 
+## Kubernetes Deployment (with STUNner)
+
+### Prerequisites
+
+Install STUNner Gateway Operator:
+
+```bash
+helm repo add stunner https://l7mp.io/stunner
+helm install stunner-gateway-operator stunner/stunner-gateway-operator
+```
+
+### Deploy
+
+```bash
+kubectl apply -k k8s/
+```
+
+### Manifests
+
+- `k8s/namespace.yaml` - SFU namespace
+- `k8s/deployment.yaml` - SFU server deployment
+- `k8s/service.yaml` - gRPC (TCP:8080) and Media (UDP:3478) services
+- `k8s/stunner-gateway.yaml` - STUNner Gateway configuration
+- `k8s/stunner-routes.yaml` - UDP and gRPC routes
+
 ## License
 
 MIT

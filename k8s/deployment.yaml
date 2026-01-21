@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sfu-server
+  namespace: sfu
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: sfu-server
+  template:
+    metadata:
+      labels:
+        app: sfu-server
+    spec:
+      containers:
+        - name: sfu-server
+          image: duratm/media-server:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 50051
+              name: grpc
+              protocol: TCP
+            - containerPort: 3478
+              name: media
+              protocol: UDP
+          env:
+            - name: SFU_HOST
+              value: "0.0.0.0"
+            - name: SFU_PORT
+              value: "8080"
+            - name: MEDIA_PORT
+              value: "3478"
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
