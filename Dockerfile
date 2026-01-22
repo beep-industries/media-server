@@ -31,8 +31,8 @@ WORKDIR /app
 COPY --from=builder /build/target/release/sfu-server /app/sfu-server
 
 # UDP media default range and gRPC port
-EXPOSE 50051/tcp
+EXPOSE 50052/tcp
 EXPOSE 3478-3482/udp
 
 # Run with safe defaults that bind to all interfaces
-CMD ["/app/sfu-server", "--grpc-addr", "0.0.0.0:50051", "--host", "0.0.0.0", "--media-port-min", "3478", "--media-port-max", "3482"]
+CMD ["/app/sfu-server", "--grpc-addr", "0.0.0.0:50052", "--host", "0.0.0.0", "--media-port-min", "3478", "--media-port-max", "3482"]
