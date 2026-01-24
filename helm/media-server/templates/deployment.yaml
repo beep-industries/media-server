@@ -18,6 +18,15 @@ spec:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--host"
+            - {{ .Values.sfu.host | quote }}
+            - "--grpc-addr"
+            - "{{ .Values.sfu.host }}:{{ .Values.service.grpcPort }}"
+            - "--media-port-min"
+            - {{ .Values.service.mediaPort | quote }}
+            - "--media-port-max"
+            - {{ .Values.service.mediaPort | quote }}
           ports:
             - containerPort: {{ .Values.service.grpcPort }}
               name: grpc
@@ -25,10 +34,5 @@ spec:
             - containerPort: {{ .Values.service.mediaPort }}
               name: media
               protocol: UDP
-          env:
-            {{- range $key, $value := .Values.env }}
-            - name: {{ $key }}
-              value: {{ $value | quote }}
-            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}

@@ -9,10 +9,8 @@ service:
   grpcPort: 50051
   mediaPort: 3478
 
-env:
-  SFU_HOST: "0.0.0.0"
-  SFU_PORT: "8080"
-  MEDIA_PORT: "3478"
+sfu:
+  host: "0.0.0.0"
 
 resources:
   requests:
@@ -23,7 +21,7 @@ resources:
     cpu: "500m"
 
 stunner:
-  enabled: true
+  enabled: false
   udpGateway: udp-gateway
   udpRouteNamespace: stunner
   grpcGateway: web
