@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "media-server.fullname" . }}
+  labels:
+    {{- include "media-server.labels" . | nindent 4 }}
+spec:
+  selector:
+    {{- include "media-server.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: {{ .Values.service.grpcPort }}
+      protocol: TCP
+      appProtocol: kubernetes.io/grpc
+    - name: media
+      port: {{ .Values.service.mediaPort }}
+      targetPort: {{ .Values.service.mediaPort }}
+      protocol: UDP

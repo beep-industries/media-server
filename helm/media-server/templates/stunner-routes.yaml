@@ -1,0 +1,33 @@
+{{- if .Values.stunner.enabled }}
+apiVersion: stunner.l7mp.io/v1
+kind: UDPRoute
+metadata:
+  name: {{ include "media-server.fullname" . }}-media-route
+  namespace: {{ .Values.stunner.udpRouteNamespace }}
+  labels:
+    {{- include "media-server.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.stunner.udpGateway }}
+  rules:
+    - backendRefs:
+        - name: {{ include "media-server.fullname" . }}
+          namespace: {{ .Release.Namespace }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: {{ include "media-server.fullname" . }}-grpc-route
+  labels:
+    {{- include "media-server.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.stunner.grpcGateway }}
+      namespace: {{ .Values.stunner.grpcGatewayNamespace }}
+  hostnames: [{{ .Values.stunner.hostname | quote }}]
+  rules:
+    - backendRefs:
+        - name: {{ include "media-server.fullname" . }}
+          namespace: {{ .Release.Namespace }}
+          port: {{ .Values.service.grpcPort }}
+{{- end }}
