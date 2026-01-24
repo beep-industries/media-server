@@ -7,7 +7,7 @@ image:
 
 service:
   grpcPort: 50051
-  mediaPort: 3478
+  mediaPort: 33478
 
 sfu:
   host: "0.0.0.0"
