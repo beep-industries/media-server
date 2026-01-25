@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "media-server.fullname" . }}
+  labels:
+    {{- include "media-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "media-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "media-server.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "/app/sfu-server"
+            - "--host"
+            - {{ .Values.sfu.host | quote }}
+            - "--grpc-addr"
+            - "{{ .Values.sfu.host }}:{{ .Values.service.grpcPort }}"
+            - "--media-port-min"
+            - {{ .Values.service.mediaPort | quote }}
+            - "--media-port-max"
+            - {{ .Values.service.mediaPort | quote }}
+          ports:
+            - containerPort: {{ .Values.service.grpcPort }}
+              name: grpc
+              protocol: TCP
+            - containerPort: {{ .Values.service.mediaPort }}
+              name: media
+              protocol: UDP
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

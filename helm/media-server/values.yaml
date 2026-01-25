@@ -1,0 +1,29 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/beep-industries/media-server
+  tag: ""
+  pullPolicy: IfNotPresent
+
+service:
+  grpcPort: 50051
+  mediaPort: 33478
+
+sfu:
+  host: "0.0.0.0"
+
+resources:
+  requests:
+    memory: "128Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+
+stunner:
+  enabled: false
+  udpGateway: udp-gateway
+  udpRouteNamespace: stunner
+  grpcGateway: web
+  grpcGatewayNamespace: gateway
+  hostname: beep.ovh

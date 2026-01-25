@@ -1,0 +1,11 @@
+Media Server has been deployed.
+
+gRPC signaling endpoint: {{ include "media-server.fullname" . }}:{{ .Values.service.grpcPort }}
+UDP media endpoint:      {{ include "media-server.fullname" . }}:{{ .Values.service.mediaPort }}
+
+{{- if .Values.stunner.enabled }}
+
+STUNner routes are enabled:
+  - UDPRoute in namespace "{{ .Values.stunner.udpRouteNamespace }}" via gateway "{{ .Values.stunner.udpGateway }}"
+  - GRPCRoute via gateway "{{ .Values.stunner.grpcGateway }}" ({{ .Values.stunner.hostname }})
+{{- end }}
