@@ -18,10 +18,15 @@ spec:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: MY_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
           args:
             - "/app/sfu-server"
             - "--host"
-            - {{ .Values.sfu.host | quote }}
+            - "$(MY_IP)"
             - "--grpc-addr"
             - "{{ .Values.sfu.host }}:{{ .Values.service.grpcPort }}"
             - "--media-port-min"
