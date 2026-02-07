@@ -5,6 +5,8 @@ message OfferRequest {
   uint64 session_id = 1;
   uint64 endpoint_id = 2;
   string offer_sdp = 3; // JSON string of RTCSessionDescription
+  bool enable_transcription = 4; // Enable transcription for this endpoint
+  string transcription_language = 5; // Language code (e.g., "en", "auto")
 }
 
 message OfferResponse {
@@ -24,7 +26,50 @@ message LeaveResponse {
   string error = 2;
 }
 
+// Transcription messages
+message TranscriptionSubscription {
+  uint64 session_id = 1;
+}
+
+message TranscriptionUpdate {
+  uint64 session_id = 1;
+  uint64 endpoint_id = 2;
+  string text = 3;
+  uint64 start_ms = 4;
+  uint64 end_ms = 5;
+}
+
+message EnableTranscriptionRequest {
+  uint64 session_id = 1;
+  uint64 endpoint_id = 2;
+  string language = 3; // Language code (e.g., "en", "auto")
+}
+
+message EnableTranscriptionResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
+message DisableTranscriptionRequest {
+  uint64 session_id = 1;
+  uint64 endpoint_id = 2;
+}
+
+message DisableTranscriptionResponse {
+  bool ok = 1;
+  string error = 2;
+}
+
 service Signaling {
   rpc Offer(OfferRequest) returns (OfferResponse);
   rpc Leave(LeaveRequest) returns (LeaveResponse);
+
+  // Subscribe to transcription updates for a session
+  rpc SubscribeTranscription(TranscriptionSubscription) returns (stream TranscriptionUpdate);
+
+  // Enable transcription for an endpoint (can be called at any time)
+  rpc EnableTranscription(EnableTranscriptionRequest) returns (EnableTranscriptionResponse);
+
+  // Disable transcription for an endpoint
+  rpc DisableTranscription(DisableTranscriptionRequest) returns (DisableTranscriptionResponse);
 }

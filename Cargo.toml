@@ -25,7 +25,7 @@ futures = "0.3.31"
 hyper = { version = "0.14", features = ["server", "http1", "tcp", "stream"] }
 tokio-util = { version = "0.7.17", features = ["codec"] }
 rand = "0.9.2"
-sfu = "0.0.3"
+sfu = { path = "vendor/sfu" }
 async-broadcast = "0.7.2"
 rcgen = "0.12"
 ctrlc = "3.5.1"
@@ -37,6 +37,11 @@ systemstat = "0.2.5"
 tonic = { version = "0.12" }
 prost = "0.13"
 prost-types = "0.13"
+tokio-stream = "0.1"
+
+# Transcription dependencies
+audiopus = "0.3.0-rc.0"         # OPUS codec decoding
+rubato = "0.15"                 # Audio resampling (48kHz → 16kHz)
 
 [build-dependencies]
 tonic-build = "0.12"

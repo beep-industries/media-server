@@ -1,0 +1,64 @@
+# SimulStreaming Transcription Server
+#
+# This docker-compose file sets up a SimulStreaming server for
+# real-time speech-to-text transcription.
+#
+# Usage:
+#   docker-compose up -d
+#
+# Or with GPU:
+#   docker-compose up -d --build
+
+version: '3.8'
+
+services:
+  simulstreaming:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "43007:43007"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "43007"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    # Uncomment to use a different model or options
+    # command: >
+    #   python3 simulstreaming_whisper_server.py
+    #   --host 0.0.0.0
+    #   --port 43007
+    #   --language en
+    #   --task transcribe
+    #   --vac
+    #   --min-chunk-size 0.3
+    #   --warmup-file warmup.wav
+
+  # Optional: Run multiple instances for load balancing
+  # simulstreaming-2:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "43008:43007"
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: 1
+  #             capabilities: [gpu]
+  #   environment:
+  #     - CUDA_VISIBLE_DEVICES=1
+

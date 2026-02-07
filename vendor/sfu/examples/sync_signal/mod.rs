@@ -1,24 +1,92 @@
 #![allow(dead_code)]
 
 use bytes::{Bytes, BytesMut};
-use log::{error, trace};
-use opentelemetry_sdk::metrics::SdkMeterProvider;
+use log::error;
 use retty::channel::{InboundPipeline, Pipeline};
 use retty::transport::{TaggedBytesMut, TransportContext};
+use rouille::{Request, Response, ResponseBody};
 use sfu::{
-    AudioPacketInfo, AudioSender, DataChannelHandler, DemuxerHandler, DtlsHandler,
-    ExceptionHandler, GatewayHandler, InterceptorHandler, RTCSessionDescription, SctpHandler,
-    ServerConfig, ServerStates, SrtpHandler, StunHandler,
+    DataChannelHandler, DemuxerHandler, DtlsHandler, ExceptionHandler, GatewayHandler,
+    InterceptorHandler, RTCSessionDescription, SctpHandler, ServerConfig, ServerStates,
+    SrtpHandler, StunHandler,
 };
 use std::cell::RefCell;
-use std::io::{Error, ErrorKind};
+use std::collections::HashMap;
+use std::io::{Error, ErrorKind, Read};
 use std::net::{SocketAddr, UdpSocket};
 use std::rc::Rc;
-use std::sync::mpsc::{Receiver, Sender, SyncSender};
-use std::sync::Arc;
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
-use crate::transcription::{RtpAudioExtractor, TranscriptionCommand};
+// Handle a web request.
+pub fn web_request(
+    request: &Request,
+    media_port_thread_map: Arc<HashMap<u16, SyncSender<SignalingMessage>>>,
+) -> Response {
+    if request.method() == "GET" {
+        return Response::html(include_str!("../chat.html"));
+    }
+
+    // "/offer/433774451/456773342" or "/leave/433774451/456773342"
+    let path: Vec<String> = request.url().split('/').map(|s| s.to_owned()).collect();
+    if path.len() != 4 || path[2].parse::<u64>().is_err() || path[3].parse::<u64>().is_err() {
+        return Response::empty_400();
+    }
+
+    let session_id = path[2].parse::<u64>().unwrap();
+    let mut sorted_ports: Vec<u16> = media_port_thread_map.keys().map(|x| *x).collect();
+    sorted_ports.sort();
+    assert!(!sorted_ports.is_empty());
+    let port = sorted_ports[(session_id as usize) % sorted_ports.len()];
+    let tx = media_port_thread_map.get(&port);
+
+    // Expected POST SDP Offers.
+    let mut offer_sdp = vec![];
+    request
+        .data()
+        .expect("body to be available")
+        .read_to_end(&mut offer_sdp)
+        .unwrap();
+
+    // The Rtc instance is shipped off to the main run loop.
+    if let Some(tx) = tx {
+        let endpoint_id = path[3].parse::<u64>().unwrap();
+        if path[1] == "offer" {
+            let (response_tx, response_rx) = mpsc::sync_channel(1);
+
+            tx.send(SignalingMessage {
+                request: SignalingProtocolMessage::Offer {
+                    session_id,
+                    endpoint_id,
+                    offer_sdp: Bytes::from(offer_sdp),
+                },
+                response_tx,
+            })
+            .expect("to send SignalingMessage instance");
+
+            let response = response_rx.recv().expect("receive answer offer");
+            match response {
+                SignalingProtocolMessage::Answer {
+                    session_id: _,
+                    endpoint_id: _,
+                    answer_sdp,
+                } => Response::from_data("application/json", answer_sdp),
+                _ => Response::empty_404(),
+            }
+        } else {
+            // leave
+            Response {
+                status_code: 200,
+                headers: vec![],
+                data: ResponseBody::empty(),
+                upgrade: None,
+            }
+        }
+    } else {
+        Response::empty_406()
+    }
+}
 
 /// This is the "main run loop" that handles all clients, reads and writes UdpSocket traffic,
 /// and forwards media data between clients.
@@ -27,40 +95,15 @@ pub fn sync_run(
     socket: UdpSocket,
     rx: Receiver<SignalingMessage>,
     server_config: Arc<ServerConfig>,
-    _meter_provider: SdkMeterProvider,
-) -> anyhow::Result<()> {
-    sync_run_with_transcription(stop_rx, socket, rx, server_config, None)
-}
-
-/// Run loop with optional transcription support.
-///
-/// If `audio_tx` is provided, audio packets will be extracted and sent to the transcription system.
-pub fn sync_run_with_transcription(
-    stop_rx: crossbeam_channel::Receiver<()>,
-    socket: UdpSocket,
-    rx: Receiver<SignalingMessage>,
-    server_config: Arc<ServerConfig>,
-    transcription_tx: Option<Sender<TranscriptionCommand>>,
 ) -> anyhow::Result<()> {
     let server_states = Rc::new(RefCell::new(ServerStates::new(
         server_config,
-        socket.local_addr()?
+        socket.local_addr()?,
     )?));
 
     println!("listening {}...", socket.local_addr()?);
 
-    // Create audio channel for sfu -> transcription if transcription is enabled
-    let (sfu_audio_tx, sfu_audio_rx) = std::sync::mpsc::channel::<AudioPacketInfo>();
-
-    // Build pipeline with audio callback if transcription is enabled
-    let pipeline = if transcription_tx.is_some() {
-        build_pipeline(socket.local_addr()?, server_states.clone(), Some(sfu_audio_tx))
-    } else {
-        build_pipeline(socket.local_addr()?, server_states.clone(), None)
-    };
-
-    // RTP audio extractor for SSRC -> session mapping
-    let mut audio_extractor = RtpAudioExtractor::new();
+    let pipeline = build_pipeline(socket.local_addr()?, server_states.clone());
 
     let mut buf = vec![0; 2000];
 
@@ -79,53 +122,9 @@ pub fn sync_run_with_transcription(
 
         // Spawn new incoming signal message from the signaling server thread.
         if let Ok(signal_message) = rx.try_recv() {
-            if let Err(err) = handle_signaling_message_with_extractor(
-                &server_states,
-                signal_message,
-                Some(&mut audio_extractor),
-            ) {
+            if let Err(err) = handle_signaling_message(&server_states, signal_message) {
                 error!("handle_signaling_message got error:{}", err);
                 continue;
-            }
-        }
-
-        // Process audio packets from the sfu gateway (decrypted audio)
-        if let Some(ref tx) = transcription_tx {
-            // Non-blocking receive of all available audio packets
-            while let Ok(audio_info) = sfu_audio_rx.try_recv() {
-                // Look up session/endpoint for this SSRC using the extractor
-                let (session_id, endpoint_id) = audio_extractor
-                    .ssrc_map
-                    .get(&audio_info.ssrc)
-                    .copied()
-                    .unwrap_or_else(|| {
-                        // If not mapped, use default session if auto-learn is enabled
-                        if let Some(default) = audio_extractor.default_session {
-                            audio_extractor.ssrc_map.insert(audio_info.ssrc, default);
-                            trace!(
-                                "Auto-mapped SSRC {} to session {}/endpoint {}",
-                                audio_info.ssrc, default.0, default.1
-                            );
-                            default
-                        } else {
-                            (0, 0) // Unknown session
-                        }
-                    });
-
-                if session_id != 0 {
-                    let audio_packet = crate::transcription::AudioPacket {
-                        session_id,
-                        endpoint_id,
-                        opus_data: audio_info.payload,
-                        timestamp: audio_info.timestamp,
-                        ssrc: audio_info.ssrc,
-                    };
-                    trace!(
-                        "Forwarding decrypted audio: session={}, endpoint={}, ssrc={}, size={}",
-                        session_id, endpoint_id, audio_info.ssrc, audio_packet.opus_data.len()
-                    );
-                    let _ = tx.send(TranscriptionCommand::Audio(audio_packet));
-                }
             }
         }
 
@@ -197,7 +196,6 @@ fn read_socket_input(socket: &UdpSocket, buf: &mut [u8]) -> Option<TaggedBytesMu
 fn build_pipeline(
     local_addr: SocketAddr,
     server_states: Rc<RefCell<ServerStates>>,
-    audio_tx: Option<AudioSender>,
 ) -> Rc<Pipeline<TaggedBytesMut, TaggedBytesMut>> {
     let pipeline: Pipeline<TaggedBytesMut, TaggedBytesMut> = Pipeline::new();
 
@@ -210,11 +208,8 @@ fn build_pipeline(
     // SRTP
     let srtp_handler = SrtpHandler::new(Rc::clone(&server_states));
     let interceptor_handler = InterceptorHandler::new(Rc::clone(&server_states));
-    // Gateway - with optional audio callback for transcription
-    let gateway_handler = match audio_tx {
-        Some(tx) => GatewayHandler::with_audio_callback(Rc::clone(&server_states), tx),
-        None => GatewayHandler::new(Rc::clone(&server_states)),
-    };
+    // Gateway
+    let gateway_handler = GatewayHandler::new(Rc::clone(&server_states));
     let exception_handler = ExceptionHandler::new();
 
     pipeline.add_back(demuxer_handler);
@@ -257,22 +252,6 @@ pub enum SignalingProtocolMessage {
         session_id: u64,
         endpoint_id: u64,
     },
-    /// Register an SSRC for transcription
-    RegisterSsrc {
-        ssrc: u32,
-        session_id: u64,
-        endpoint_id: u64,
-    },
-    /// Enable transcription for a session (used internally)
-    EnableTranscription {
-        session_id: u64,
-        endpoint_id: u64,
-    },
-    /// Disable transcription for a session (used internally)
-    DisableTranscription {
-        session_id: u64,
-        endpoint_id: u64,
-    },
 }
 
 pub struct SignalingMessage {
@@ -283,15 +262,6 @@ pub struct SignalingMessage {
 pub fn handle_signaling_message(
     server_states: &Rc<RefCell<ServerStates>>,
     signaling_msg: SignalingMessage,
-) -> anyhow::Result<()> {
-    handle_signaling_message_with_extractor(server_states, signaling_msg, None)
-}
-
-/// Handle signaling with optional audio extractor for SSRC registration.
-pub fn handle_signaling_message_with_extractor(
-    server_states: &Rc<RefCell<ServerStates>>,
-    signaling_msg: SignalingMessage,
-    audio_extractor: Option<&mut RtpAudioExtractor>,
 ) -> anyhow::Result<()> {
     match signaling_msg.request {
         SignalingProtocolMessage::Offer {
@@ -314,34 +284,6 @@ pub fn handle_signaling_message_with_extractor(
             endpoint_id,
             signaling_msg.response_tx,
         ),
-        SignalingProtocolMessage::RegisterSsrc {
-            ssrc,
-            session_id,
-            endpoint_id,
-        } => {
-            if let Some(extractor) = audio_extractor {
-                extractor.register_ssrc(ssrc, session_id, endpoint_id);
-            }
-            Ok(())
-        }
-        SignalingProtocolMessage::EnableTranscription {
-            session_id,
-            endpoint_id,
-        } => {
-            if let Some(extractor) = audio_extractor {
-                extractor.enable_transcription_for_session(session_id, endpoint_id);
-            }
-            Ok(())
-        }
-        SignalingProtocolMessage::DisableTranscription {
-            session_id,
-            endpoint_id,
-        } => {
-            if let Some(extractor) = audio_extractor {
-                extractor.disable_transcription_for_session(session_id, endpoint_id);
-            }
-            Ok(())
-        }
         SignalingProtocolMessage::Ok {
             session_id,
             endpoint_id,
@@ -380,11 +322,18 @@ fn handle_offer_message(
 ) -> anyhow::Result<()> {
     let try_handle = || -> anyhow::Result<Bytes> {
         let offer_str = String::from_utf8(offer.to_vec())?;
+        log::info!(
+            "handle_offer_message: {}/{}/{}",
+            session_id,
+            endpoint_id,
+            offer_str,
+        );
         let mut server_states = server_states.borrow_mut();
 
         let offer_sdp = serde_json::from_str::<RTCSessionDescription>(&offer_str)?;
         let answer = server_states.accept_offer(session_id, endpoint_id, None, offer_sdp)?;
         let answer_str = serde_json::to_string(&answer)?;
+        log::info!("generate answer sdp: {}", answer_str);
         Ok(Bytes::from(answer_str))
     };
 
