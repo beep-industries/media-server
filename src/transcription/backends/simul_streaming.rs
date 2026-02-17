@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use log::{debug, error, info, warn};
 
-use super::TranscriptionSegment;
+use super::SyncTranscriptionBackend;
+use crate::transcription::TranscriptionSegment;
 
 /// Synchronous client for SimulStreaming TCP server.
 ///
@@ -30,6 +31,16 @@ pub struct SimulStreamingClient {
     stream: TcpStream,
     result_rx: Receiver<TranscriptionSegment>,
     _reader_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl SyncTranscriptionBackend for SimulStreamingClient {
+    fn send_audio(&mut self, audio: &[i16]) -> anyhow::Result<()> {
+        SimulStreamingClient::send_audio(self, audio)
+    }
+
+    fn try_recv(&mut self) -> Option<TranscriptionSegment> {
+        SimulStreamingClient::try_recv(self)
+    }
 }
 
 impl SimulStreamingClient {
@@ -192,6 +203,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
 use tokio::net::TcpStream as TokioTcpStream;
 use tokio::sync::mpsc as tokio_mpsc;
 
+use super::TranscriptionBackend;
+
 /// Asynchronous client for SimulStreaming TCP server.
 ///
 /// This client uses Tokio for async I/O and is suitable for integration
@@ -208,6 +221,17 @@ use tokio::sync::mpsc as tokio_mpsc;
 pub struct AsyncSimulStreamingClient {
     write_half: tokio::net::tcp::OwnedWriteHalf,
     result_rx: tokio_mpsc::Receiver<TranscriptionSegment>,
+}
+
+#[async_trait::async_trait]
+impl TranscriptionBackend for AsyncSimulStreamingClient {
+    async fn send_audio(&mut self, audio: &[i16]) -> anyhow::Result<()> {
+        self.send_audio(audio).await
+    }
+
+    async fn next_segment(&mut self) -> anyhow::Result<Option<TranscriptionSegment>> {
+        Ok(self.recv().await)
+    }
 }
 
 impl AsyncSimulStreamingClient {

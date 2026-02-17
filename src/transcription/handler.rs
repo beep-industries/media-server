@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 
-use super::{AudioDecoder, TranscriptionManager};
+use super::{AudioDecoder, TranscriptionConfig, TranscriptionManager};
 
 /// Audio data to be sent to the transcription worker thread.
 #[derive(Debug)]
@@ -24,7 +24,11 @@ pub struct AudioPacket {
 #[derive(Debug)]
 pub enum TranscriptionCommand {
     /// Start transcription for a session/endpoint
-    StartSession { session_id: u64, endpoint_id: u64 },
+    StartSession {
+        session_id: u64,
+        endpoint_id: u64,
+        config: Option<TranscriptionConfig>,
+    },
     /// Stop transcription for a session/endpoint
     StopSession { session_id: u64, endpoint_id: u64 },
     /// Process audio packet
@@ -246,12 +250,13 @@ impl TranscriptionWorker {
                     TranscriptionCommand::StartSession {
                         session_id,
                         endpoint_id,
+                        config,
                     } => {
                         debug!(
-                            "Starting transcription session {}/{}",
-                            session_id, endpoint_id
+                            "Starting transcription session {}/{} (config override: {})",
+                            session_id, endpoint_id, config.is_some()
                         );
-                        if let Err(e) = self.manager.start_session(session_id, endpoint_id) {
+                        if let Err(e) = self.manager.start_session(session_id, endpoint_id, config) {
                             error!("Failed to start transcription session: {}", e);
                         }
                         // Create decoder for this session

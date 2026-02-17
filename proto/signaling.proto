@@ -43,6 +43,13 @@ message EnableTranscriptionRequest {
   uint64 session_id = 1;
   uint64 endpoint_id = 2;
   string language = 3; // Language code (e.g., "en", "auto")
+
+  // Backend configuration
+  string backend = 4; // "simul-streaming" or "openai"
+  string simul_streaming_addr = 5; // Address of SimulStreaming server
+  string openai_api_key = 6;
+  string openai_base_url = 7;
+  string openai_model = 8;
 }
 
 message EnableTranscriptionResponse {

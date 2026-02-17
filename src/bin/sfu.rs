@@ -22,7 +22,7 @@ use futures::Stream;
 
 use media_server::signal::{self, SignalingMessage, SignalingProtocolMessage};
 use media_server::transcription::{
-    create_transcription_channel, TranscriptionConfig, TranscriptionManager,
+    create_transcription_channel, TranscriptionConfig, TranscriptionManager, TranscriptionCommand,
 };
 
 use tonic::{transport::Server, Request, Response, Status};
@@ -83,12 +83,23 @@ struct Cli {
     level: Level,
 
     /// Enable transcription support
-    #[arg(long)]
+    #[arg(long, help = "Enable transcription support")]
     enable_transcription: bool,
 
-    /// SimulStreaming server address(es) for transcription (comma-separated)
-    #[arg(long, default_value_t = String::from("localhost:43007"))]
-    transcription_servers: String,
+    #[arg(long, default_value = "simul-streaming", help = "Transcription backend: simul-streaming, openai, or none")]
+    transcription_backend: String,
+
+    #[arg(long, default_value = "localhost:43007", help = "SimulStreaming server address(es) (comma-separated)")]
+    simul_streaming_addr: String,
+
+    #[arg(long, env = "OPENAI_API_KEY", help = "OpenAI API Key")]
+    openai_api_key: Option<String>,
+
+    #[arg(long, help = "OpenAI Base URL (e.g. for OpenRouter)")]
+    openai_base_url: Option<String>,
+
+    #[arg(long, help = "OpenAI Model")]
+    openai_model: Option<String>,
 }
 
 fn init_meter_provider(
@@ -134,6 +145,7 @@ fn init_meter_provider(
 struct SignalingSvc {
     media_port_thread_map: Arc<HashMap<u16, SyncSender<SignalingMessage>>>,
     transcription_manager: Option<Arc<TranscriptionManager>>,
+    transcription_tx: Option<std::sync::mpsc::Sender<TranscriptionCommand>>,
     transcription_subscribers: Arc<tokio::sync::RwLock<HashMap<u64, Vec<tokio_mpsc::Sender<TranscriptionUpdate>>>>>,
 }
 
@@ -141,19 +153,21 @@ impl SignalingSvc {
     fn new(
         media_port_thread_map: HashMap<u16, SyncSender<SignalingMessage>>,
         transcription_manager: Option<Arc<TranscriptionManager>>,
+        transcription_tx: Option<std::sync::mpsc::Sender<TranscriptionCommand>>,
     ) -> Self {
         Self {
             media_port_thread_map: Arc::new(media_port_thread_map),
             transcription_manager,
+            transcription_tx,
             transcription_subscribers: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
-    /// Poll transcription results and distribute to subscribers
-    async fn poll_and_distribute_transcriptions(&self) {
+    pub async fn poll_and_distribute_transcriptions(&self) {
         if let Some(ref manager) = self.transcription_manager {
             let results = manager.poll_results();
             for (session_id, endpoint_id, segment) in results {
+                info!("Distributing transcription for session {} endpoint {}: '{}'", session_id, endpoint_id, segment.text);
                 let update = TranscriptionUpdate {
                     session_id,
                     endpoint_id,
@@ -170,6 +184,26 @@ impl SignalingSvc {
                     }
                 }
             }
+        }
+    }
+
+    fn start_transcription_session(&self, session_id: u64, endpoint_id: u64, config: Option<TranscriptionConfig>) -> anyhow::Result<()> {
+        if let Some(ref tx) = self.transcription_tx {
+            tx.send(TranscriptionCommand::StartSession { session_id, endpoint_id, config })
+                .map_err(|e| anyhow::anyhow!("Failed to send start session command: {}", e))?;
+        } else if let Some(ref manager) = self.transcription_manager {
+             manager.start_session(session_id, endpoint_id, config)?;
+        } else {
+             return Err(anyhow::anyhow!("Transcription not enabled"));
+        }
+        Ok(())
+    }
+
+    fn stop_transcription_session(&self, session_id: u64, endpoint_id: u64) {
+         if let Some(ref tx) = self.transcription_tx {
+            let _ = tx.send(TranscriptionCommand::StopSession { session_id, endpoint_id });
+        } else if let Some(ref manager) = self.transcription_manager {
+             manager.stop_session(session_id, endpoint_id);
         }
     }
 }
@@ -201,22 +235,18 @@ impl Signaling for SignalingSvc {
 
         // Start transcription session if requested and available
         if enable_transcription {
-            if let Some(ref manager) = self.transcription_manager {
-                if let Err(e) = manager.start_session(session_id, endpoint_id) {
-                    log::warn!("Failed to start transcription for {}/{}: {}", session_id, endpoint_id, e);
-                } else {
-                    // Notify the media worker to enable transcription extraction for this session
-                    let (enable_tx, _) = mpsc::sync_channel(1);
-                    let _ = tx.send(SignalingMessage {
-                        request: SignalingProtocolMessage::EnableTranscription {
-                            session_id,
-                            endpoint_id,
-                        },
-                        response_tx: enable_tx,
-                    });
-                }
+            if let Err(e) = self.start_transcription_session(session_id, endpoint_id, None) {
+                log::warn!("Failed to start transcription for {}/{}: {}", session_id, endpoint_id, e);
             } else {
-                log::warn!("Transcription requested but not enabled on server");
+                // Notify the media worker to enable transcription extraction for this session
+                let (enable_tx, _) = mpsc::sync_channel(1);
+                let _ = tx.send(SignalingMessage {
+                    request: SignalingProtocolMessage::EnableTranscription {
+                        session_id,
+                        endpoint_id,
+                    },
+                    response_tx: enable_tx,
+                });
             }
         }
 
@@ -238,9 +268,7 @@ impl Signaling for SignalingSvc {
         let endpoint_id = req.endpoint_id;
 
         // Stop transcription session if it exists
-        if let Some(ref manager) = self.transcription_manager {
-            manager.stop_session(session_id, endpoint_id);
-        }
+        self.stop_transcription_session(session_id, endpoint_id);
 
         let mut sorted_ports: Vec<u16> = self.media_port_thread_map.keys().copied().collect();
         if sorted_ports.is_empty() {
@@ -303,18 +331,60 @@ impl Signaling for SignalingSvc {
         );
 
         // Check if transcription is available
-        let manager = match &self.transcription_manager {
+        let _manager = match &self.transcription_manager {
             Some(m) => m,
             None => {
-                return Ok(Response::new(EnableTranscriptionResponse {
+                // Determine if we can construct an ad-hoc manager or if we need a global one.
+                // Currently, we expect a manager to be initialized at startup.
+                // If not, we can't enable transcription unless we change how SignalingSvc is built.
+                // Assuming manager must be present.
+               return Ok(Response::new(EnableTranscriptionResponse {
                     ok: false,
-                    error: "Transcription is not enabled on this server".to_string(),
+                    error: "Transcription is not initialized on this server".to_string(),
                 }));
             }
         };
 
+        // Determine config override
+        let config_override = if !req.backend.is_empty() {
+             match req.backend.as_str() {
+                "openai" => {
+                    if req.openai_api_key.is_empty() {
+                         return Ok(Response::new(EnableTranscriptionResponse {
+                            ok: false,
+                            error: "OpenAI API Key is required".to_string(),
+                        }));
+                    }
+                    Some(TranscriptionConfig::with_openai(
+                        req.openai_api_key,
+                        if req.openai_base_url.is_empty() { None } else { Some(req.openai_base_url) },
+                        if req.openai_model.is_empty() { None } else { Some(req.openai_model) },
+                    ))
+                }
+                "simul-streaming" => {
+                    if req.simul_streaming_addr.is_empty() {
+                         return Ok(Response::new(EnableTranscriptionResponse {
+                            ok: false,
+                            error: "SimulStreaming address is required".to_string(),
+                        }));
+                    }
+                    let addrs: Vec<String> = req.simul_streaming_addr
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .collect();
+                    Some(TranscriptionConfig::with_servers(addrs))
+                }
+                _ => None
+             }
+        } else {
+            None
+        };
+
+        // If no config provided and no backend configured on server, returning error might be good,
+        // but start_session will use default config which might point to default addresses.
+
         // Start transcription session
-        if let Err(e) = manager.start_session(session_id, endpoint_id) {
+        if let Err(e) = self.start_transcription_session(session_id, endpoint_id, config_override) {
             log::warn!("Failed to start transcription for {}/{}: {}", session_id, endpoint_id, e);
             return Ok(Response::new(EnableTranscriptionResponse {
                 ok: false,
@@ -357,7 +427,7 @@ impl Signaling for SignalingSvc {
         log::info!("Disabling transcription for session {}/{}", session_id, endpoint_id);
 
         // Check if transcription is available
-        let manager = match &self.transcription_manager {
+        let _manager = match &self.transcription_manager {
             Some(m) => m,
             None => {
                 return Ok(Response::new(DisableTranscriptionResponse {
@@ -368,7 +438,7 @@ impl Signaling for SignalingSvc {
         };
 
         // Stop transcription session
-        manager.stop_session(session_id, endpoint_id);
+        self.stop_transcription_session(session_id, endpoint_id);
 
         // Notify the media worker to disable transcription for this session
         let mut sorted_ports: Vec<u16> = self.media_port_thread_map.keys().copied().collect();
@@ -456,19 +526,32 @@ async fn main() -> anyhow::Result<()> {
     let _meter_provider = init_meter_provider(stop_meter_rx, wait_group.clone());
 
     // Initialize transcription manager if enabled
-    let (transcription_manager, audio_tx) = if cli.enable_transcription {
-        let server_addresses: Vec<String> = cli.transcription_servers
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
+    let (transcription_manager, worker_handle) = if cli.enable_transcription {
+        let config = match cli.transcription_backend.as_str() {
+            "openai" => {
+                let api_key = cli.openai_api_key.expect("OpenAI API Key is required for openai backend");
+                println!("Transcription enabled using OpenAI backend");
+                TranscriptionConfig::with_openai(
+                    api_key,
+                    cli.openai_base_url,
+                    cli.openai_model,
+                )
+            }
+            "none" => {
+                println!("Transcription enabled with NO default backend (client must provide config)");
+                TranscriptionConfig::none()
+            }
+            "simul-streaming" | _ => {
+                let server_addresses: Vec<String> = cli.simul_streaming_addr
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
+                println!("Transcription enabled with SimulStreaming servers: {:?}", server_addresses);
+                TranscriptionConfig::with_servers(server_addresses)
+            }
+        };
 
-        println!("Transcription enabled with servers: {:?}", server_addresses);
-
-        let manager = Arc::new(TranscriptionManager::new(
-            TranscriptionConfig::with_servers(server_addresses)
-        ));
-
-        // Create transcription channel and worker
+        let manager = Arc::new(TranscriptionManager::new(config));
         let (tx, mut worker) = create_transcription_channel(Arc::clone(&manager));
 
         // Spawn worker thread
@@ -489,7 +572,7 @@ async fn main() -> anyhow::Result<()> {
             .expect(&format!("binding to {host_addr}:{port}"));
         media_port_thread_map.insert(port, signaling_tx);
         let server_config = server_config.clone();
-        let audio_tx = audio_tx.clone();
+        let audio_tx = worker_handle.clone();
         std::thread::spawn(move || {
             if let Err(err) = signal::sync_run_with_transcription(
                 stop_rx,
@@ -504,7 +587,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let svc = SignalingSvc::new(media_port_thread_map, transcription_manager);
+    let svc = SignalingSvc::new(media_port_thread_map, transcription_manager, worker_handle);
     let svc = Arc::new(svc);
 
     // Spawn transcription polling task if enabled

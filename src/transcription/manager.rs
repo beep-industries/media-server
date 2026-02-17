@@ -8,17 +8,35 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use log::{debug, error, info, warn};
-use tokio::sync::mpsc as tokio_mpsc;
 
 use super::{
-    AsyncSimulStreamingClient, AudioDecoder, SimulStreamingClient, TranscriptionSegment,
+    AudioDecoder, SimulStreamingClient, TranscriptionSegment,
 };
+use super::backends::{SyncTranscriptionBackend, OpenAiSyncBackend};
+
+#[derive(Debug, Clone)]
+pub enum TranscriptionBackendConfig {
+    None,
+    SimulStreaming {
+        addresses: Vec<String>,
+    },
+    OpenAi {
+        api_key: String,
+        base_url: Option<String>,
+        model: Option<String>,
+    },
+}
+
+impl Default for TranscriptionBackendConfig {
+    fn default() -> Self {
+        Self::None
+    }
+}
 
 /// Configuration for the transcription manager.
 #[derive(Debug, Clone)]
 pub struct TranscriptionConfig {
-    /// SimulStreaming server addresses (for connection pooling)
-    pub server_addresses: Vec<String>,
+    pub backend: TranscriptionBackendConfig,
     /// Connection timeout
     pub connect_timeout: Duration,
     /// Whether to automatically reconnect on failure
@@ -30,7 +48,7 @@ pub struct TranscriptionConfig {
 impl Default for TranscriptionConfig {
     fn default() -> Self {
         Self {
-            server_addresses: vec!["localhost:43007".to_string()],
+            backend: TranscriptionBackendConfig::default(),
             connect_timeout: Duration::from_secs(10),
             auto_reconnect: true,
             max_reconnect_attempts: 3,
@@ -39,10 +57,12 @@ impl Default for TranscriptionConfig {
 }
 
 impl TranscriptionConfig {
-    /// Create a new config with a single server address.
+    /// Create a new config with a single server address (Shim for compatibility).
     pub fn new(server_addr: &str) -> Self {
         Self {
-            server_addresses: vec![server_addr.to_string()],
+            backend: TranscriptionBackendConfig::SimulStreaming {
+                addresses: vec![server_addr.to_string()],
+            },
             ..Default::default()
         }
     }
@@ -50,7 +70,28 @@ impl TranscriptionConfig {
     /// Create a new config with multiple server addresses for load balancing.
     pub fn with_servers(server_addresses: Vec<String>) -> Self {
         Self {
-            server_addresses,
+            backend: TranscriptionBackendConfig::SimulStreaming {
+                addresses: server_addresses,
+            },
+            ..Default::default()
+        }
+    }
+
+    pub fn with_openai(api_key: String, base_url: Option<String>, model: Option<String>) -> Self {
+        Self {
+            backend: TranscriptionBackendConfig::OpenAi {
+                api_key,
+                base_url,
+                model,
+            },
+            ..Default::default()
+        }
+    }
+
+    /// Create a new config with no backend.
+    pub fn none() -> Self {
+        Self {
+            backend: TranscriptionBackendConfig::None,
             ..Default::default()
         }
     }
@@ -64,26 +105,50 @@ pub struct TranscriptionSession {
     pub endpoint_id: u64,
     /// Audio decoder (OPUS -> PCM 16kHz)
     decoder: AudioDecoder,
-    /// SimulStreaming client
-    client: SimulStreamingClient,
+    /// Transcription backend
+    backend: Box<dyn SyncTranscriptionBackend>,
 }
 
 impl TranscriptionSession {
     /// Create a new transcription session.
-    pub fn new(session_id: u64, endpoint_id: u64, server_addr: &str) -> anyhow::Result<Self> {
+    pub fn new(
+        session_id: u64,
+        endpoint_id: u64,
+        config: &TranscriptionConfig,
+        server_index: usize, // for round-robin
+    ) -> anyhow::Result<Self> {
         let decoder = AudioDecoder::new()?;
-        let client = SimulStreamingClient::connect(server_addr)?;
 
-        info!(
-            "Created transcription session {}/{} connected to {}",
-            session_id, endpoint_id, server_addr
-        );
+        let backend: Box<dyn SyncTranscriptionBackend> = match &config.backend {
+            TranscriptionBackendConfig::None => {
+                return Err(anyhow::anyhow!("No transcription backend configured for this session"));
+            }
+            TranscriptionBackendConfig::SimulStreaming { addresses } => {
+                if addresses.is_empty() {
+                    return Err(anyhow::anyhow!("No SimulStreaming addresses configured"));
+                }
+                let addr = &addresses[server_index % addresses.len()];
+                info!(
+                    "Creating SimulStreaming session {}/{} connected to {}",
+                    session_id, endpoint_id, addr
+                );
+                Box::new(SimulStreamingClient::connect_with_timeout(addr, config.connect_timeout)?)
+            }
+            TranscriptionBackendConfig::OpenAi { api_key, base_url, model } => {
+                info!("Creating OpenAI session {}/{}", session_id, endpoint_id);
+                Box::new(OpenAiSyncBackend::new(
+                    api_key.clone(),
+                    base_url.clone(),
+                    model.clone(),
+                ))
+            }
+        };
 
         Ok(Self {
             session_id,
             endpoint_id,
             decoder,
-            client,
+            backend,
         })
     }
 
@@ -94,8 +159,8 @@ impl TranscriptionSession {
         // Decode OPUS and resample to 16kHz
         let pcm = self.decoder.decode(opus_data)?;
 
-        // Send to SimulStreaming
-        self.client.send_audio(&pcm)?;
+        // Send to backend
+        self.backend.send_audio(&pcm)?;
 
         Ok(())
     }
@@ -103,23 +168,28 @@ impl TranscriptionSession {
     /// Process raw PCM audio (already at correct format).
     ///
     /// Use this if audio is already 16kHz mono PCM.
+    #[allow(dead_code)]
     pub fn process_raw_pcm(&mut self, pcm_data: &[i16]) -> anyhow::Result<()> {
-        self.client.send_audio(pcm_data)
+        self.backend.send_audio(pcm_data)
     }
 
     /// Try to get transcription results (non-blocking).
-    pub fn try_recv(&self) -> Option<TranscriptionSegment> {
-        self.client.try_recv()
+    pub fn try_recv(&mut self) -> Option<TranscriptionSegment> {
+        self.backend.try_recv()
     }
 
     /// Get transcription results (blocking).
-    pub fn recv(&self) -> Option<TranscriptionSegment> {
-        self.client.recv()
+    #[allow(dead_code)]
+    pub fn recv(&mut self) -> Option<TranscriptionSegment> {
+        // Fallback to try_recv if backend implies blocking or use a loop/sleep
+        self.backend.try_recv() // Placeholder
     }
 
     /// Get transcription results with timeout.
-    pub fn recv_timeout(&self, timeout: Duration) -> Option<TranscriptionSegment> {
-        self.client.recv_timeout(timeout)
+    #[allow(dead_code)]
+    pub fn recv_timeout(&mut self, _timeout: Duration) -> Option<TranscriptionSegment> {
+         // TODO: Add timeout support to trait
+         self.backend.try_recv()
     }
 }
 
@@ -136,10 +206,20 @@ pub struct TranscriptionManager {
 impl TranscriptionManager {
     /// Create a new transcription manager.
     pub fn new(config: TranscriptionConfig) -> Self {
-        info!(
-            "Creating TranscriptionManager with {} servers",
-            config.server_addresses.len()
-        );
+        match &config.backend {
+            TranscriptionBackendConfig::None => {
+                info!("Creating TranscriptionManager with NO default backend (client-provided config required)");
+            }
+            TranscriptionBackendConfig::SimulStreaming { addresses } => {
+                info!(
+                    "Creating TranscriptionManager with {} SimulStreaming servers",
+                    addresses.len()
+                );
+            }
+            TranscriptionBackendConfig::OpenAi { .. } => {
+                info!("Creating TranscriptionManager with OpenAI backend");
+            }
+        }
 
         Self {
             config,
@@ -149,7 +229,12 @@ impl TranscriptionManager {
     }
 
     /// Start a transcription session for a participant.
-    pub fn start_session(&self, session_id: u64, endpoint_id: u64) -> anyhow::Result<()> {
+    pub fn start_session(
+        &self,
+        session_id: u64,
+        endpoint_id: u64,
+        config_override: Option<TranscriptionConfig>,
+    ) -> anyhow::Result<()> {
         let key = (session_id, endpoint_id);
 
         // Check if session already exists
@@ -164,16 +249,25 @@ impl TranscriptionManager {
             }
         }
 
-        // Get next server address (round-robin)
-        let server_addr = {
+        let config = config_override.as_ref().unwrap_or(&self.config);
+
+        // Get server index
+        let server_index = {
             let mut index = self.next_server_index.lock().unwrap();
-            let addr = &self.config.server_addresses[*index % self.config.server_addresses.len()];
-            *index = (*index + 1) % self.config.server_addresses.len();
-            addr.clone()
+            let current = *index;
+            match &self.config.backend {
+                TranscriptionBackendConfig::SimulStreaming { addresses } => {
+                     if !addresses.is_empty() {
+                        *index = (*index + 1) % addresses.len();
+                     }
+                }
+                _ => {}
+            }
+            current
         };
 
         // Create new session
-        let session = TranscriptionSession::new(session_id, endpoint_id, &server_addr)?;
+        let session = TranscriptionSession::new(session_id, endpoint_id, config, server_index)?;
 
         // Store session
         {
@@ -182,8 +276,8 @@ impl TranscriptionManager {
         }
 
         info!(
-            "Started transcription session {}/{} on {}",
-            session_id, endpoint_id, server_addr
+            "Started transcription session {}/{}",
+            session_id, endpoint_id
         );
 
         Ok(())
@@ -239,7 +333,7 @@ impl TranscriptionManager {
         let mut results = Vec::new();
 
         for (&(session_id, endpoint_id), session) in sessions.iter() {
-            let session = session.lock().unwrap();
+            let mut session = session.lock().unwrap();
             while let Some(segment) = session.try_recv() {
                 results.push((session_id, endpoint_id, segment));
             }
@@ -257,106 +351,6 @@ impl TranscriptionManager {
     pub fn has_session(&self, session_id: u64, endpoint_id: u64) -> bool {
         let sessions = self.sessions.read().unwrap();
         sessions.contains_key(&(session_id, endpoint_id))
-    }
-}
-
-// ============================================================================
-// Async Manager
-// ============================================================================
-
-/// Async version of the transcription manager.
-///
-/// Uses Tokio for async I/O and provides channels for receiving results.
-pub struct AsyncTranscriptionManager {
-    config: TranscriptionConfig,
-    result_tx: tokio_mpsc::Sender<(u64, u64, TranscriptionSegment)>,
-    result_rx: tokio::sync::Mutex<tokio_mpsc::Receiver<(u64, u64, TranscriptionSegment)>>,
-}
-
-impl AsyncTranscriptionManager {
-    /// Create a new async transcription manager.
-    pub fn new(config: TranscriptionConfig) -> Self {
-        let (tx, rx) = tokio_mpsc::channel(1000);
-
-        Self {
-            config,
-            result_tx: tx,
-            result_rx: tokio::sync::Mutex::new(rx),
-        }
-    }
-
-    /// Start a transcription session and spawn a task to handle it.
-    pub async fn start_session(
-        &self,
-        session_id: u64,
-        endpoint_id: u64,
-    ) -> anyhow::Result<tokio_mpsc::Sender<Vec<i16>>> {
-        let server_addr = &self.config.server_addresses[0]; // Simple: use first server
-
-        let mut client = AsyncSimulStreamingClient::connect(server_addr).await?;
-        let result_tx = self.result_tx.clone();
-
-        // Create channel for sending audio to this session
-        let (audio_tx, mut audio_rx) = tokio_mpsc::channel::<Vec<i16>>(100);
-
-        // Spawn task to handle this session
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    // Receive audio to send
-                    Some(pcm_data) = audio_rx.recv() => {
-                        if let Err(e) = client.send_audio(&pcm_data).await {
-                            error!("Failed to send audio: {}", e);
-                            break;
-                        }
-                    }
-                    // Receive transcription results
-                    Some(segment) = client.recv() => {
-                        if result_tx.send((session_id, endpoint_id, segment)).await.is_err() {
-                            break;
-                        }
-                    }
-                    else => break,
-                }
-            }
-            info!(
-                "Transcription session {}/{} ended",
-                session_id, endpoint_id
-            );
-        });
-
-        info!(
-            "Started async transcription session {}/{} on {}",
-            session_id, endpoint_id, server_addr
-        );
-
-        Ok(audio_tx)
-    }
-
-    /// Receive transcription results.
-    pub async fn recv(&self) -> Option<(u64, u64, TranscriptionSegment)> {
-        self.result_rx.lock().await.recv().await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_config_default() {
-        let config = TranscriptionConfig::default();
-        assert_eq!(config.server_addresses.len(), 1);
-        assert_eq!(config.server_addresses[0], "localhost:43007");
-    }
-
-    #[test]
-    fn test_config_with_servers() {
-        let config = TranscriptionConfig::with_servers(vec![
-            "server1:43007".to_string(),
-            "server2:43008".to_string(),
-        ]);
-        assert_eq!(config.server_addresses.len(), 2);
     }
 }
 

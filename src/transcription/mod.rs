@@ -8,12 +8,12 @@
 //! - Transcription result parsing
 //! - SFU pipeline integration via TranscriptionHandler
 
-mod client;
+pub mod backends;
 mod decoder;
 mod handler;
 mod manager;
 
-pub use client::{AsyncSimulStreamingClient, SimulStreamingClient};
+pub use backends::simul_streaming::{AsyncSimulStreamingClient, SimulStreamingClient};
 pub use decoder::{AudioDecoder, AudioResampler};
 pub use handler::{
     create_transcription_channel, AudioPacket, RtpAudioExtractor, TranscriptionCommand,
@@ -21,7 +21,7 @@ pub use handler::{
 };
 pub use manager::{TranscriptionConfig, TranscriptionManager};
 
-/// Transcription result from SimulStreaming
+/// Transcription result from SimulStreaming or OpenAI
 #[derive(Debug, Clone)]
 pub struct TranscriptionSegment {
     /// Start timestamp in milliseconds (relative to audio stream start)
