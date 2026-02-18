@@ -27,3 +27,6 @@ stunner:
   grpcGateway: web
   grpcGatewayNamespace: gateway
   hostname: beep.ovh
+
+transcription:
+  backend: "none"
