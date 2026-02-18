@@ -34,8 +34,8 @@ spec:
             - "--media-port-max"
             - {{ .Values.service.mediaPort | quote }}
             - "--enable-transcription"
-            - "--trancsription-backend"
-            - {{ .Values.transcription.backends | join "," | quote }}
+            - "--transcription-backend"
+            - {{ .Values.transcription.backend | join "," | quote }}
           ports:
             - containerPort: {{ .Values.service.grpcPort }}
               name: grpc
