@@ -1,15 +1,16 @@
 ## Multi-stage build for media-server (sfu-server binary)
 
 # ---------- Builder stage ----------
-FROM rust:1.91.1 as builder
+FROM rust:1.91.1 AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler cmake build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
 # Cache dependencies first
 COPY Cargo.toml Cargo.lock ./
+COPY vendor ./vendor
 COPY build.rs ./
 COPY proto ./proto
 COPY src ./src
